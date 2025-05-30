@@ -17,7 +17,7 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I2I04VU09)
 
-Rust로 작성되었고, 설정 없이 바로 사용할 수 있는 원격 데스크톱 소프트웨어입니다. 자신의 데이터를 완전히 제어할 수 있고, 보안 염려도 없습니다. 저희 rendezvous/relay 서버를 사용하거나, [직접 설정](https://rustdesk.com/server)하거나 [자체 rendezvous/relay 서버를 구축](https://github.com/rustdesk/rustdesk-server-demo)할 수도 있습니다.
+Rust로 작성되었고, 설정 없이 바로 사용할 수 있는 원격 데스크톱 소프트웨어입니다. 자신의 데이터를 완전히 제어할 수 있고, 보안 염려도 없습니다. 저희 rendezvous/relay 서버를 사용하거나, [직접 설정](https://lijue.me/server)하거나 [자체 rendezvous/relay 서버를 구축](https://github.com/rustdesk/rustdesk-server-demo)할 수도 있습니다.
 
 ![image](https://user-images.githubusercontent.com/71636191/171661982-430285f0-2e12-4b1d-9957-4a58e375304d.png)
 
@@ -57,7 +57,7 @@ Sciter 동적 라이브러리를 직접 다운로드하세요.
 
 - `cargo run`을 실행합니다.
 
-## [빌드](https://rustdesk.com/docs/en/dev/build/)
+## [빌드](https://lijue.me/docs/en/dev/build/)
 
 ## Linux에서 빌드 방법
 

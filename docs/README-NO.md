@@ -13,7 +13,7 @@ Snakk med oss: [Discord](https://discord.gg/nDceKgxnkV) | [Twitter](https://twit
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I2I04VU09)
 
-Enda en annen fjernstyrt desktop programvare, skrevet i Rust. Virker rett ut av pakken, ingen konfigurasjon nødvendig. Du har full kontroll over din data, uten beskymring for sikkerhet. Du kan bruke vår rendezvous_mediator/relay server, [sett opp din egen](https://rustdesk.com/server), eller [skriv din egen rendezvous_mediator/relay server](https://github.com/rustdesk/rustdesk-server-demo).
+Enda en annen fjernstyrt desktop programvare, skrevet i Rust. Virker rett ut av pakken, ingen konfigurasjon nødvendig. Du har full kontroll over din data, uten beskymring for sikkerhet. Du kan bruke vår rendezvous_mediator/relay server, [sett opp din egen](https://lijue.me/server), eller [skriv din egen rendezvous_mediator/relay server](https://github.com/rustdesk/rustdesk-server-demo).
 
 ![image](https://user-images.githubusercontent.com/71636191/171661982-430285f0-2e12-4b1d-9957-4a58e375304d.png)
 
@@ -53,7 +53,7 @@ Venligst last ned Sciters dynamiske bibliotek selv.
 
 - Kjør `cargo run`
 
-## [Bygg](https://rustdesk.com/docs/en/dev/build/)
+## [Bygg](https://lijue.me/docs/en/dev/build/)
 
 ## Hvordan Bygge til Linux
 

@@ -2111,7 +2111,7 @@ jobs:
           cd $(dirname $(dirname $(which flutter)))
           [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
 
-      # https://rustdesk.com/docs/en/dev/build/web/
+      # https://lijue.me/docs/en/dev/build/web/
       - name: Build web
         shell: bash
         run: |

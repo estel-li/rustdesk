@@ -3,7 +3,7 @@ Version:    1.4.0
 Release:    0
 Summary:    RPM package
 License:    GPL-3.0
-URL:        https://rustdesk.com
+URL:        https://lijue.me
 Vendor:     rustdesk <info@rustdesk.com>
 Requires:   gtk3 libxcb1 xdotool libXfixes3 alsa-utils libXtst6 libva2 pam gstreamer-plugins-base gstreamer-plugin-pipewire
 Recommends: libayatana-appindicator3-1
