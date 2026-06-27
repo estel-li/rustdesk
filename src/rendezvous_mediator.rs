@@ -40,6 +40,8 @@ fn connection_meta(
     ConnectionMeta {
         control_permissions,
         controlled_context,
+        // CE-M1-7: 默认非 relay；走 relay 路径时由 create_relay_connection_ 改写。
+        via_relay: false,
     }
 }
 

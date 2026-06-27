@@ -763,5 +763,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Show on the minimized toolbar", ""),
         ("All monitors", ""),
         ("#{} monitor", ""),
+        // CE-M1-4: API 账号 MFA UI 文案
+        ("API 2FA code", ""),
+        ("API MFA code", ""),
+        ("API 2FA verification", ""),
+        ("Use recovery code", ""),
+        ("Use TOTP code", ""),
+        ("Invalid MFA code", ""),
+        ("MFA ticket expired, please login again", ""),
+        ("API 2FA disabled, ticket dropped", ""),
+        ("Please use the Flutter client for API MFA login", ""),
     ].iter().cloned().collect();
 }

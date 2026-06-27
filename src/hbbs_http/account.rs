@@ -105,6 +105,13 @@ pub struct AuthBody {
     #[serde(default)]
     pub secret: String,
     pub user: UserPayload,
+    // CE-M1-4: 防御性字段。OIDC 流程目前不会产出 API 账号 MFA,但即使将来回归出现
+    // mfa_required=true,我们也确保不把 access_token / user_info 写入 LocalConfig。
+    // ticket 仅在内存中存在,绝不持久化。
+    #[serde(default)]
+    pub mfa_required: bool,
+    #[serde(default)]
+    pub mfa_ticket: Option<String>,
 }
 
 pub struct OidcSession {
@@ -262,6 +269,20 @@ impl OidcSession {
         while OIDC_SESSION.read().unwrap().keep_querying && begin.elapsed() < query_timeout {
             match Self::query(&api_server, &code_url.code, &id, &uuid) {
                 Ok(HbbHttpResponse::<_>::Data(auth_body)) => {
+                    // CE-M1-4: 防御性栅栏 — 即便 OIDC 流程目前不会产出 API 账号 MFA,
+                    // 一旦出现 mfa_required==true 也绝不把 access_token / user_info 写盘,
+                    // 同时不缓存 auth_body(其中含 mfa_ticket)。这样客户端只能通过
+                    // Flutter UI 完成 API MFA,与 ticket 仅内存的安全约束保持一致。
+                    if auth_body.mfa_required {
+                        log::warn!(
+                            "Received mfa_required in OIDC auth_task; ignoring access_token persistence"
+                        );
+                        OIDC_SESSION.write().unwrap().set_state(
+                            REQUESTING_ACCOUNT_AUTH,
+                            "API MFA must be completed via Flutter UI".to_owned(),
+                        );
+                        return;
+                    }
                     if auth_body.r#type == "access_token" {
                         if remember_me {
                             LocalConfig::set_option(
@@ -362,5 +383,49 @@ impl OidcSession {
 
     pub fn get_result() -> AuthResult {
         OIDC_SESSION.read().unwrap().get_result_()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // CE-M1-4: 老服务端不返回 mfa_required / mfa_ticket,反序列化必须保持兼容。
+    #[test]
+    fn auth_body_backward_compat() {
+        let json = r#"{
+            "access_token": "abc",
+            "type": "access_token",
+            "user": {
+                "name": "alice",
+                "info": {}
+            }
+        }"#;
+        let body: AuthBody = serde_json::from_str(json).expect("legacy json should parse");
+        assert_eq!(body.access_token, "abc");
+        assert_eq!(body.r#type, "access_token");
+        assert!(!body.mfa_required);
+        assert!(body.mfa_ticket.is_none());
+        assert_eq!(body.user.name, "alice");
+    }
+
+    // CE-M1-4: 新服务端响应携带 mfa_required + mfa_ticket 时同样应成功反序列化,
+    // 且这些字段不会被任何调用方写入 LocalConfig(由 auth_task 防御性分支保证)。
+    #[test]
+    fn auth_body_with_mfa_required_parses() {
+        let json = r#"{
+            "access_token": "",
+            "type": "mfa_required",
+            "mfa_required": true,
+            "mfa_ticket": "T",
+            "user": {
+                "name": "alice",
+                "info": {}
+            }
+        }"#;
+        let body: AuthBody = serde_json::from_str(json).expect("mfa json should parse");
+        assert!(body.mfa_required);
+        assert_eq!(body.mfa_ticket.as_deref(), Some("T"));
+        assert_eq!(body.r#type, "mfa_required");
     }
 }

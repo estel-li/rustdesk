@@ -342,9 +342,14 @@ pub struct Connection {
     multi_ui_session: bool,
     tx_from_authed: mpsc::UnboundedSender<ipc::Data>,
     printer_data: Vec<(Instant, String, Vec<u8>)>,
-    // For post requests that need to be sent sequentially.
-    // eg. post_conn_audit
-    tx_post_seq: mpsc::UnboundedSender<(String, Value)>,
+    // 长 relay 阈值告警每会话最多发一次的去抖标记。
+    long_relay_alarm_sent: bool,
+    // 会话开始时间，用于触发长 relay 告警。
+    session_started_at: Instant,
+    // CE-M1-7: 记录第一个非正常 on_close 的原因，便于发出 abnormal_close 审计。
+    close_reason: Option<String>,
+    // CE-M1-7: 本连接是否经过 relay；用于长时间 relay 阈值检测。
+    via_relay: bool,
     // Tracks read job IDs delegated to CM process.
     // When a read job is delegated to CM (via FS::ReadFile), the job id is added here.
     // Used to filter stale responses (FileBlockFromCM, FileReadDone, etc.) for
@@ -413,6 +418,7 @@ impl Connection {
         let super::ConnectionMeta {
             control_permissions,
             controlled_context,
+            via_relay,
         } = meta;
         // Android is not supported yet, so we always set control_permissions to None.
         #[cfg(target_os = "android")]
@@ -443,10 +449,8 @@ impl Connection {
         let linux_headless_handle =
             LinuxHeadlessHandle::new(_rx_cm_stream_ready, _tx_desktop_ready);
 
-        let (tx_post_seq, rx_post_seq) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            Self::post_seq_loop(rx_post_seq).await;
-        });
+        // 审计上报已统一收口到 crate::hbbs_http::audit。worker 在首次 enqueue 时由
+        // OnceCell/lazy_static 启动，无需在每条连接里再开 mpsc。
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let tx_cloned = tx.clone();
@@ -535,7 +539,10 @@ impl Connection {
             retina: Retina::default(),
             tx_from_authed,
             printer_data: Vec::new(),
-            tx_post_seq,
+            long_relay_alarm_sent: false,
+            session_started_at: Instant::now(),
+            close_reason: None,
+            via_relay,
             cm_read_job_ids: HashSet::new(),
             terminal_service_id: "".to_owned(),
             terminal_persistent: false,
@@ -1028,6 +1035,8 @@ impl Connection {
                     conn.file_remove_log_control.on_timer().drain(..).map(|x| conn.send_to_cm(x)).count();
                     #[cfg(feature = "hwcodec")]
                     conn.update_supported_encoding();
+                    // CE-M1-7: 长 relay 阈值告警，每会话最多一次。
+                    conn.maybe_post_long_relay_alarm();
                 }
                 _ = test_delay_timer.tick() => {
                     if last_recv_time.elapsed() >= SEC30 {
@@ -1091,9 +1100,22 @@ impl Connection {
             raii::AuthedConnID::check_remove_session(conn.inner.id(), conn.session_key());
         }
 
-        conn.post_conn_audit(json!({
-            "action": "close",
-        }));
+        // CE-M1-7: 区分正常关闭与异常断开。
+        // - 若到这一步 conn 已被 on_close 提前关闭（close_reason 非空且不是 "End"），则发 abnormal_close；
+        // - 同时附带会话时长，便于服务端事后聚合「长会话」与「relay 持久」统计。
+        let session_secs = conn.session_started_at.elapsed().as_secs();
+        let close_payload = match conn.close_reason.clone() {
+            Some(reason) if reason != "End" && !reason.is_empty() => json!({
+                "action": "abnormal_close",
+                "reason": reason,
+                "duration": session_secs,
+            }),
+            _ => json!({
+                "action": "close",
+                "duration": session_secs,
+            }),
+        };
+        conn.post_conn_audit(close_payload);
         if let Some(s) = conn.server.upgrade() {
             let mut s = s.write().unwrap();
             s.remove_connection(&conn.inner);
@@ -1207,13 +1229,6 @@ impl Connection {
         #[cfg(target_os = "linux")]
         clear_remapped_keycode();
         log::debug!("Input thread exited");
-    }
-
-    async fn post_seq_loop(mut rx: mpsc::UnboundedReceiver<(String, Value)>) {
-        while let Some((url, v)) = rx.recv().await {
-            allow_err!(Self::post_audit_async(url, v).await);
-        }
-        log::debug!("post_seq_loop exited");
     }
 
     async fn try_port_forward_loop(
@@ -1386,7 +1401,7 @@ impl Connection {
         v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
         v["conn_id"] = json!(self.inner.id);
         v["session_id"] = json!(self.lr.session_id);
-        allow_err!(self.tx_post_seq.send((url, v)));
+        let _ = crate::hbbs_http::audit::enqueue(url, v);
     }
 
     fn get_files_for_audit(job_type: fs::JobType, mut files: Vec<FileEntry>) -> Vec<(String, i64)> {
@@ -1412,6 +1427,21 @@ impl Connection {
         files: Vec<(String, i64)>,
         info: Value,
     ) {
+        self.post_file_audit_with_outcome(r#type, path, files, info, "start", None);
+    }
+
+    /// 带 outcome / error 字段的文件审计上报。
+    ///
+    /// `outcome` 取 "start" | "success" | "fail"；老服务端会忽略未识别字段，向后兼容。
+    fn post_file_audit_with_outcome(
+        &self,
+        r#type: FileAuditType,
+        path: &str,
+        files: Vec<(String, i64)>,
+        info: Value,
+        outcome: &str,
+        error: Option<String>,
+    ) {
         if self.server_audit_file.is_empty() {
             return;
         }
@@ -1426,7 +1456,7 @@ impl Connection {
         info["name"] = json!(self.lr.my_name.clone());
         info["num"] = json!(file_num);
         info["files"] = json!(files);
-        let v = json!({
+        let mut v = json!({
             "id":json!(Config::get_id()),
             "uuid":json!(crate::encode64(hbb_common::get_uuid())),
             "peer_id":json!(self.lr.my_id),
@@ -1435,10 +1465,12 @@ impl Connection {
             "path":path,
             "is_file":is_file,
             "info":json!(info).to_string(),
+            "outcome": outcome,
         });
-        tokio::spawn(async move {
-            allow_err!(Self::post_audit_async(url, v).await);
-        });
+        if let Some(err) = error {
+            v["error"] = json!(err);
+        }
+        let _ = crate::hbbs_http::audit::enqueue(url, v);
     }
 
     fn post_alarm_audit(&self, typ: AlarmAuditType, info: Value) {
@@ -1461,14 +1493,65 @@ impl Connection {
                 v["conn_audit_ref"] = json!(audit_ref);
             }
         }
-        tokio::spawn(async move {
-            allow_err!(Self::post_audit_async(url, v).await);
-        });
+        let _ = crate::hbbs_http::audit::enqueue(url, v);
     }
 
-    #[inline]
-    async fn post_audit_async(url: String, v: Value) -> ResultType<String> {
-        crate::post_request(url, v.to_string(), "").await
+    /// 剪贴板内容审计上报。`content` 不会进入 payload，只保留 sha256 前缀 + 长度 + 可选 preview。
+    ///
+    /// `direction`: "rx" 表示从远端控制端收到的内容；"tx" 表示被控端发出的内容。
+    /// `format`: "text" | "html" | "rtf" | "image" | "file"。
+    fn post_clipboard_audit(&self, direction: &str, format: &str, content: &[u8]) {
+        if crate::hbbs_http::audit::is_clipboard_disabled() {
+            return;
+        }
+        let url = crate::get_audit_server(
+            Config::get_option("api-server"),
+            Config::get_option("custom-rendezvous-server"),
+            crate::hbbs_http::audit::AUDIT_TYP_CLIPBOARD.to_owned(),
+        );
+        if url.is_empty() {
+            return;
+        }
+        let is_text = format == "text";
+        let (sha256, length, preview) = crate::hbbs_http::audit::hash_clipboard(content, is_text);
+        let mut v = json!({
+            "id": Config::get_id(),
+            "uuid": crate::encode64(hbb_common::get_uuid()),
+            "conn_id": self.inner.id(),
+            "peer_id": self.lr.my_id,
+            "from_name": self.lr.my_name,
+            "ip": self.ip.clone(),
+            "direction": direction,
+            "format": format,
+            "length": length,
+            "sha256": sha256,
+            "ts": hbb_common::get_time() / 1000,
+        });
+        if let Some(p) = preview {
+            v["preview"] = json!(p);
+        }
+        let _ = crate::hbbs_http::audit::enqueue(url, v);
+    }
+
+    /// CE-M1-7: 若本连接经过 relay 且会话时长超过阈值，则发一次 LongRelay 告警。
+    /// 每会话最多发一次（`long_relay_alarm_sent` 去抖）。
+    fn maybe_post_long_relay_alarm(&mut self) {
+        if self.long_relay_alarm_sent || !self.via_relay {
+            return;
+        }
+        let threshold = crate::hbbs_http::audit::long_relay_threshold_secs();
+        let elapsed = self.session_started_at.elapsed().as_secs();
+        if elapsed >= threshold {
+            self.long_relay_alarm_sent = true;
+            self.post_alarm_audit(
+                AlarmAuditType::LongRelay,
+                json!({
+                    "duration": elapsed,
+                    "threshold": threshold,
+                    "ip": self.ip.clone(),
+                }),
+            );
+        }
     }
 
     fn normalize_port_forward_target(pf: &mut PortForward) -> (String, bool) {
@@ -2922,6 +3005,14 @@ impl Connection {
                 }
                 Some(message::Union::Clipboard(cb)) => {
                     if self.clipboard_enabled() {
+                        // CE-M1-7：在落地剪贴板前先做一次审计上报（hash + length + 可选 preview）。
+                        // 解压只为了得到真实长度与 hash，明文绝不写日志或 payload。
+                        let raw: Vec<u8> = if cb.compress {
+                            hbb_common::compress::decompress(&cb.content)
+                        } else {
+                            cb.content.to_vec()
+                        };
+                        self.post_clipboard_audit("rx", "text", &raw);
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(vec![cb], ClipboardSide::Host);
                         // ios as the controlled side is actually not supported for now.
@@ -2950,6 +3041,17 @@ impl Connection {
                 }
                 Some(message::Union::MultiClipboards(_mcb)) => {
                     if self.clipboard_enabled() {
+                        // CE-M1-7：MultiClipboards 包含多种格式（text/html/rtf/image）。
+                        // 对每条单独发审计；仅 text 类填 preview。
+                        for cb in _mcb.clipboards.iter() {
+                            let raw: Vec<u8> = if cb.compress {
+                                hbb_common::compress::decompress(&cb.content)
+                            } else {
+                                cb.content.to_vec()
+                            };
+                            let format = clipboard_format_name(cb.format.enum_value_or_default());
+                            self.post_clipboard_audit("rx", format, &raw);
+                        }
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(_mcb.clipboards, ClipboardSide::Host);
                         #[cfg(target_os = "android")]
@@ -4652,6 +4754,10 @@ impl Connection {
             return;
         }
         self.closed = true;
+        // CE-M1-7: 记录首次关闭原因，便于后续判定 abnormal_close。
+        if self.close_reason.is_none() {
+            self.close_reason = Some(reason.to_owned());
+        }
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
@@ -4800,6 +4906,16 @@ impl Connection {
         fr.set_done(done);
         msg.set_file_response(fr);
         self.send(msg).await;
+
+        // CE-M1-7: 文件读取成功 → 上报 outcome=success
+        self.post_file_audit_with_outcome(
+            FileAuditType::RemoteSend,
+            "",
+            vec![],
+            json!({"job_id": id, "file_num": file_num}),
+            "success",
+            None,
+        );
     }
 
     async fn handle_file_read_error(&mut self, id: i32, file_num: i32, err: String) {
@@ -4812,6 +4928,16 @@ impl Connection {
             );
             return;
         }
+
+        // CE-M1-7: 文件读取失败 → 上报 outcome=fail（在 send error 之前发，避免 self.send 的可变借用冲突）
+        self.post_file_audit_with_outcome(
+            FileAuditType::RemoteSend,
+            "",
+            vec![],
+            json!({"job_id": id, "file_num": file_num}),
+            "fail",
+            Some(err.clone()),
+        );
 
         // Forward error to client
         self.send(fs::new_error(id, err, file_num)).await;
@@ -5520,6 +5646,21 @@ fn try_activate_screen() {
     });
 }
 
+/// 把 protobuf 的 ClipboardFormat 映射到审计 payload 的稳定字符串。
+/// 未知/不支持的格式统一记为 "other"。
+fn clipboard_format_name(
+    fmt: hbb_common::message_proto::ClipboardFormat,
+) -> &'static str {
+    use hbb_common::message_proto::ClipboardFormat as F;
+    match fmt {
+        F::Text => "text",
+        F::Html => "html",
+        F::Rtf => "rtf",
+        F::ImageRgba | F::ImagePng | F::ImageSvg => "image",
+        F::Special => "other",
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AlarmAuditType {
     IpWhitelist = 0,
@@ -5531,6 +5672,10 @@ pub enum AlarmAuditType {
     ExceedIPv6PrefixAttempts = 6,
     TerminalOsLoginBackoff = 7,
     TerminalOsLoginConcurrency = 8,
+    // 新增（CE-M1-7）：连接被策略拒绝（暂留 hook 给 M2 RBAC 直接调用）
+    ConnectionDenied = 9,
+    // 新增（CE-M1-7）：会话超过阈值仍走 relay
+    LongRelay = 10,
 }
 
 pub enum FileAuditType {
@@ -6189,5 +6334,52 @@ mod test {
         assert!(Ipv6Addr::from_str("::1").is_ok());
         assert!(Ipv6Addr::from_str("127.0.0.1").is_err());
         assert!(Ipv6Addr::from_str("0").is_err());
+    }
+
+    /// CE-M1-7: 枚举数值与历史 typ 一致，且新增值 9/10 不与旧值冲突。
+    #[test]
+    fn alarm_audit_type_numeric_compat() {
+        assert_eq!(AlarmAuditType::IpWhitelist as i8, 0);
+        assert_eq!(AlarmAuditType::ExceedThirtyAttempts as i8, 1);
+        assert_eq!(AlarmAuditType::SixAttemptsWithinOneMinute as i8, 2);
+        assert_eq!(AlarmAuditType::ExceedIPv6PrefixAttempts as i8, 6);
+        assert_eq!(AlarmAuditType::TerminalOsLoginBackoff as i8, 7);
+        assert_eq!(AlarmAuditType::TerminalOsLoginConcurrency as i8, 8);
+        // 新增值不得占用旧的 3/4/5 占位。
+        assert_eq!(AlarmAuditType::ConnectionDenied as i8, 9);
+        assert_eq!(AlarmAuditType::LongRelay as i8, 10);
+    }
+
+    /// CE-M1-7: 旧服务端解析不带 outcome / error 字段的 file audit payload 仍应成功。
+    #[test]
+    fn file_audit_outcome_field_is_optional() {
+        // 旧 payload 形态（无 outcome/error）
+        let old = serde_json::json!({
+            "id": "x", "uuid": "u", "peer_id": "p", "conn_id": 1,
+            "type": 0, "path": "/tmp", "is_file": true, "info": "{}",
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&old.to_string()).unwrap();
+        assert!(parsed.get("outcome").is_none());
+        // 新 payload 形态
+        let new = serde_json::json!({
+            "id": "x", "uuid": "u", "peer_id": "p", "conn_id": 1,
+            "type": 0, "path": "/tmp", "is_file": true, "info": "{}",
+            "outcome": "success",
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&new.to_string()).unwrap();
+        assert_eq!(parsed["outcome"], serde_json::json!("success"));
+    }
+
+    /// CE-M1-7: clipboard_format_name 映射稳定。
+    #[test]
+    fn clipboard_format_name_mapping() {
+        use hbb_common::message_proto::ClipboardFormat as F;
+        assert_eq!(super::clipboard_format_name(F::Text), "text");
+        assert_eq!(super::clipboard_format_name(F::Html), "html");
+        assert_eq!(super::clipboard_format_name(F::Rtf), "rtf");
+        assert_eq!(super::clipboard_format_name(F::ImageRgba), "image");
+        assert_eq!(super::clipboard_format_name(F::ImagePng), "image");
+        assert_eq!(super::clipboard_format_name(F::ImageSvg), "image");
+        assert_eq!(super::clipboard_format_name(F::Special), "other");
     }
 }

@@ -1545,6 +1545,15 @@ function login() {
                 show_progress(false, err);
                 return;
             }
+            // CE-M1-4: Sciter UI 已 deprecated,不实现 API 账号 MFA 输入流程,
+            // 仅给出明确提示,引导用户使用 Flutter 客户端,避免登录卡死。
+            if (data.mfa_required || data.type == 'mfa_required') {
+                abLoading = false;
+                show_progress(-1);
+                view.msgbox(#alert, translate('API 2FA verification'),
+                    translate('Please use the Flutter client for API MFA login'));
+                return;
+            }
             if (data.type == 'email_check') {
                 abLoading = false;
                 show_progress(-1);
@@ -1596,11 +1605,20 @@ function on_2fa_check(last_msg) {
                 secret: secret,
                 deviceInfo: getDeviceInfo()
             };
-            httpRequest(url + "/api/login", #post, loginData, 
+            httpRequest(url + "/api/login", #post, loginData,
                 function(data) {
                     if (data.error) {
                         abLoading = false;
                         show_progress(false, data.error);
+                        return;
+                    }
+                    // CE-M1-4: 兜底,理论上 email_code 路径不会返回 mfa_required,
+                    // 但服务端策略变更时给出明确提示,Sciter UI 不再扩展输入框。
+                    if (data.mfa_required || data.type == 'mfa_required') {
+                        abLoading = false;
+                        show_progress(-1);
+                        view.msgbox(#alert, translate('API 2FA verification'),
+                            translate('Please use the Flutter client for API MFA login'));
                         return;
                     }
                     handler.set_local_option("access_token", data.access_token);

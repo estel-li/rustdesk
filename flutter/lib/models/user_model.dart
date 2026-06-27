@@ -201,7 +201,37 @@ class UserModel {
     return getLoginResponseFromAuthBody(body);
   }
 
-  LoginResponse getLoginResponseFromAuthBody(Map<String, dynamic> body) {
+  /// CE-M1-4: API 账号 MFA 第二步登录。
+  /// 接收 ticket + code + method,POST 到 /api/login-mfa,成功返回带 access_token 的 LoginResponse。
+  /// ticket 仅作为 [loginRequest.mfaTicket] 字段在内存中传递,绝不会被写入任何持久化存储。
+  /// throw [RequestException]
+  Future<LoginResponse> loginMfa(LoginRequest loginRequest) async {
+    final url = await bind.mainGetApiServer();
+    final resp = await http.post(Uri.parse('$url/api/login-mfa'),
+        body: jsonEncode(loginRequest.toJson()));
+
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(decode_http_response(resp));
+    } catch (e) {
+      debugPrint("loginMfa: jsonDecode resp body failed: ${e.toString()}");
+      if (resp.statusCode != 200) {
+        BotToast.showText(
+            contentColor: Colors.red, text: 'HTTP ${resp.statusCode}');
+      }
+      rethrow;
+    }
+    if (resp.statusCode != 200) {
+      // 服务端按 CE-M1-3 约定可能返回 error 字段:
+      //   mfa_invalid_code / mfa_ticket_expired / mfa_rate_limited 等
+      throw RequestException(resp.statusCode, body['error'] ?? '');
+    }
+    if (body['error'] != null) {
+      throw RequestException(0, body['error']);
+    }
+
+    return getLoginResponseFromAuthBody(body);
+  }
     final LoginResponse loginResponse;
     try {
       loginResponse = LoginResponse.fromJson(body);

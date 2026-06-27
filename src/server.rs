@@ -85,6 +85,8 @@ type ConnMap = HashMap<i32, ConnInner>;
 pub struct ConnectionMeta {
     pub control_permissions: Option<ControlPermissions>,
     pub controlled_context: Option<ControlledContext>,
+    // CE-M1-7: 标记本连接是否经过 relay；用于长时间 relay 告警。
+    pub via_relay: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -318,8 +320,10 @@ async fn create_relay_connection_(
     peer_addr: SocketAddr,
     secure: bool,
     ipv4: bool,
-    meta: ConnectionMeta,
+    mut meta: ConnectionMeta,
 ) -> ResultType<()> {
+    // CE-M1-7: 走到 relay 通道，打标供长时间 relay 审计使用。
+    meta.via_relay = true;
     let mut stream = socket_client::connect_tcp(
         socket_client::ipv4_to_ipv6(crate::check_port(relay_server, RELAY_PORT), ipv4),
         CONNECT_TIMEOUT,

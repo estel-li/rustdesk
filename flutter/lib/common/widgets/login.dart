@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -492,6 +493,33 @@ Future<bool?> loginDialog() async {
 
     handleLoginResponse(LoginResponse resp, bool storeIfAccessToken,
         void Function([dynamic])? close) async {
+      // CE-M1-4: API 账号 MFA 优先级高于 type 判断,避免与 email_check 流程冲突。
+      // mfaTicket 仅以局部变量形式存在,绝不调用 bind.mainSetLocalOption 落盘。
+      if (resp.mfaRequired == true ||
+          resp.type == HttpType.kAuthResTypeMfaRequired) {
+        final ticket = resp.mfaTicket;
+        if (ticket == null || ticket.isEmpty) {
+          passwordMsg = "Failed, server missed mfa ticket";
+          return;
+        }
+        setState(() => isInProgress = false);
+        // 桌面上 verificationCodeDialog 同样先暂时收起登录框,移动端不收起,以保持原行为一致。
+        if (isMobile) {
+          if (close != null) close(null);
+        } else if (isWeb && close != null) {
+          close(null);
+        }
+        final ok = await apiMfaDialog(
+          ticket: ticket,
+          methods: resp.mfaMethods,
+          username: username.text,
+        );
+        if (ok == true) {
+          if (!isWeb && !isMobile && close != null) close(false);
+          return;
+        }
+        return;
+      }
       switch (resp.type) {
         case HttpType.kAuthResTypeToken:
           if (resp.access_token != null) {
@@ -681,6 +709,157 @@ Future<bool?> loginDialog() async {
     await UserModel.updateOtherModels();
   }
 
+  return res;
+}
+
+// CE-M1-4: API 账号 MFA 输入对话框。ticket 仅作为闭包局部 final 变量持有,
+// 全流程不会被写入 LocalConfig / SharedPreferences。取消或失败时随对话框 dispose 一起释放。
+Future<bool?> apiMfaDialog({
+  required String ticket,
+  required List<String>? methods,
+  required String username,
+}) async {
+  // ticket 仅在此闭包栈内可见。严禁出现 bind.mainSetLocalOption(key: 'mfa_ticket', ...) 之类调用。
+  final String mfaTicket = ticket;
+  final code = TextEditingController();
+  final bool allowRecovery =
+      methods == null || methods.contains(MfaMethod.kRecoveryCode);
+  String currentMethod = MfaMethod.kTotp;
+  bool isInProgress = false;
+  String? errorText;
+  int disableSubmitUntilMs = 0; // mfa_rate_limited 时的解禁时间戳
+
+  final res = await gFFI.dialogManager.show<bool>((setState, close, context) {
+    bool isSubmitDisabled() {
+      if (isInProgress) return true;
+      if (disableSubmitUntilMs == 0) return false;
+      return DateTime.now().millisecondsSinceEpoch < disableSubmitUntilMs;
+    }
+
+    void onVerify() async {
+      final input = code.text.trim();
+      if (input.isEmpty) {
+        setState(() => errorText = translate('Invalid MFA code'));
+        return;
+      }
+      setState(() {
+        isInProgress = true;
+        errorText = null;
+      });
+      try {
+        final resp = await gFFI.userModel.loginMfa(LoginRequest(
+          username: username,
+          id: await bind.mainGetMyId(),
+          uuid: await bind.mainGetUuid(),
+          autoLogin: true,
+          type: HttpType.kAuthReqTypeMfaCode,
+          mfaTicket: mfaTicket,
+          mfaCode: input,
+          mfaMethod: currentMethod,
+        ));
+        if (resp.type == HttpType.kAuthResTypeToken &&
+            resp.access_token != null) {
+          await bind.mainSetLocalOption(
+              key: 'access_token', value: resp.access_token!);
+          await bind.mainSetLocalOption(
+              key: 'user_info', value: jsonEncode(resp.user ?? {}));
+          code.clear();
+          close(true);
+          return;
+        }
+        setState(() => errorText = translate('Invalid MFA code'));
+      } on RequestException catch (err) {
+        final cause = err.cause;
+        if (cause == 'mfa_ticket_expired') {
+          // ticket 过期 → 关闭对话框、回到登录窗,绝不沉默重试
+          BotToast.showText(
+              contentColor: Colors.red,
+              text: translate('MFA ticket expired, please login again'));
+          code.clear();
+          close(false);
+          return;
+        } else if (cause == 'mfa_invalid_code') {
+          code.clear();
+          setState(() => errorText = translate('Invalid MFA code'));
+        } else if (cause == 'mfa_rate_limited') {
+          // 服务端 CE-M1-3 已实现限流,客户端只禁用提交按钮,不自行重试。
+          disableSubmitUntilMs =
+              DateTime.now().millisecondsSinceEpoch + 30 * 1000;
+          setState(() => errorText = translate(cause));
+        } else {
+          setState(() => errorText = translate(cause));
+        }
+      } catch (err) {
+        setState(() => errorText = "Unknown Error: $err");
+      }
+      setState(() => isInProgress = false);
+    }
+
+    Widget buildField() {
+      if (currentMethod == MfaMethod.kTotp) {
+        return Dialog2FaField(
+          controller: code,
+          title: translate('API 2FA code'),
+          errorText: errorText,
+          readyCallback: isSubmitDisabled() ? null : onVerify,
+          onChanged: () => errorText = null,
+        );
+      }
+      // 恢复码:无数字 / 长度限制,客户端只 trim,不强校验格式(由服务端 CE-M1-2 校验)。
+      return DialogTextField(
+        title: translate('API MFA code'),
+        controller: code,
+        prefixIcon: DialogTextField.kPasswordIcon,
+        errorText: errorText,
+      );
+    }
+
+    void onCancel() {
+      // ticket 引用随闭包 GC 释放,不调用任何持久化 API。
+      code.clear();
+      close(false);
+    }
+
+    return CustomAlertDialog(
+      title: Text(translate('API 2FA verification')),
+      contentBoxConstraints: BoxConstraints(maxWidth: 320),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          buildField(),
+          if (allowRecovery)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () {
+                  setState(() {
+                    currentMethod = currentMethod == MfaMethod.kTotp
+                        ? MfaMethod.kRecoveryCode
+                        : MfaMethod.kTotp;
+                    code.clear();
+                    errorText = null;
+                  });
+                },
+                child: Text(translate(currentMethod == MfaMethod.kTotp
+                    ? 'Use recovery code'
+                    : 'Use TOTP code')),
+              ),
+            ),
+          if (isInProgress) const LinearProgressIndicator(),
+        ],
+      ),
+      onCancel: onCancel,
+      onSubmit: isSubmitDisabled() ? null : onVerify,
+      actions: [
+        dialogButton('Cancel', onPressed: onCancel, isOutline: true),
+        dialogButton('Verify',
+            onPressed: isSubmitDisabled() ? null : onVerify),
+      ],
+    );
+  });
+  if (res == true) {
+    await UserModel.updateOtherModels();
+  }
   return res;
 }
 

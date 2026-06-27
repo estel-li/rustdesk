@@ -13,10 +13,20 @@ class HttpType {
   static const kAuthReqTypeSMSCode = "sms_code";
   static const kAuthReqTypeEmailCode = "email_code";
   static const kAuthReqTypeTfaCode = "tfa_code";
+  // CE-M1-4: API 账号 MFA 第二步登录请求类型
+  static const kAuthReqTypeMfaCode = "mfa_code";
 
   static const kAuthResTypeToken = "access_token";
   static const kAuthResTypeEmailCheck = "email_check";
   static const kAuthResTypeTfaCheck = "tfa_check";
+  // CE-M1-4: 服务端要求 API 账号 MFA 时返回此 type
+  static const kAuthResTypeMfaRequired = "mfa_required";
+}
+
+// CE-M1-4: API MFA 校验方法
+class MfaMethod {
+  static const kTotp = "totp";
+  static const kRecoveryCode = "recovery_code";
 }
 
 enum UserStatus { kDisabled, kNormal, kUnverified }
@@ -140,6 +150,10 @@ class LoginRequest {
   String? verificationCode;
   String? tfaCode;
   String? secret;
+  // CE-M1-4: API 账号 MFA 第二步登录字段,仅在内存中传递,不落盘
+  String? mfaTicket;
+  String? mfaCode;
+  String? mfaMethod;
 
   LoginRequest(
       {this.username,
@@ -150,7 +164,10 @@ class LoginRequest {
       this.type,
       this.verificationCode,
       this.tfaCode,
-      this.secret});
+      this.secret,
+      this.mfaTicket,
+      this.mfaCode,
+      this.mfaMethod});
 
   Map<String, dynamic> toJson() {
     final Map<String, dynamic> data = <String, dynamic>{};
@@ -165,6 +182,11 @@ class LoginRequest {
     }
     if (tfaCode != null) data['tfaCode'] = tfaCode;
     if (secret != null) data['secret'] = secret;
+    // CE-M1-4: 字段名与 /api/login-mfa 服务端契约保持一致(ticket/code/method),
+    // 不复用 tfaCode 是为了与现有邮件 + 一次性 TOTP 流程明确区分。
+    if (mfaTicket != null) data['ticket'] = mfaTicket;
+    if (mfaCode != null) data['code'] = mfaCode;
+    if (mfaMethod != null) data['method'] = mfaMethod;
 
     Map<String, dynamic> deviceInfo = {};
     try {
@@ -183,9 +205,20 @@ class LoginResponse {
   String? tfa_type;
   String? secret;
   UserPayload? user;
+  // CE-M1-4: API 账号 MFA 状态机字段,均不写入任何持久化存储
+  bool mfaRequired = false;
+  String? mfaTicket;
+  List<String>? mfaMethods;
 
   LoginResponse(
-      {this.access_token, this.type, this.tfa_type, this.secret, this.user});
+      {this.access_token,
+      this.type,
+      this.tfa_type,
+      this.secret,
+      this.user,
+      this.mfaRequired = false,
+      this.mfaTicket,
+      this.mfaMethods});
 
   LoginResponse.fromJson(Map<String, dynamic> json) {
     access_token = json['access_token'];
@@ -193,6 +226,19 @@ class LoginResponse {
     tfa_type = json['tfa_type'];
     secret = json['secret'];
     user = json['user'] != null ? UserPayload.fromJson(json['user']) : null;
+    // CE-M1-4: 老服务端不返回这些字段,默认 false / null,行为不变
+    mfaRequired = json['mfa_required'] == true;
+    mfaTicket = json['ticket'];
+    mfaMethods = json['mfa_methods'] is List
+        ? List<String>.from(json['mfa_methods'])
+        : null;
+  }
+
+  // CE-M1-4: 日志卫生 — 打印时不暴露 mfa ticket
+  @override
+  String toString() {
+    return 'LoginResponse(type: $type, mfaRequired: $mfaRequired, '
+        'hasAccessToken: ${access_token != null}, hasMfaTicket: ${mfaTicket != null})';
   }
 }
 
