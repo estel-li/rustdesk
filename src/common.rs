@@ -1012,7 +1012,9 @@ pub fn is_rustdesk() -> bool {
 
 #[inline]
 pub fn get_uri_prefix() -> String {
-    format!("{}://", get_app_name().to_lowercase())
+    // Estel Remote: URI scheme 与显示名解耦——APP_NAME 含空格("Estel Remote"),
+    // 直接 to_lowercase 会拼出非法的 "estel remote://"。scheme 用固定 "estel"。
+    "estel://".to_owned()
 }
 
 #[cfg(target_os = "macos")]
