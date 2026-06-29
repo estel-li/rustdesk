@@ -2448,7 +2448,7 @@ class _AboutState extends State<_About> {
                         .marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString('https://estel.example.com/privacy.html'); // TODO Estel: 填真实隐私页 URL
+                    launchUrlString('https://lijue.net/privacy.html');
                   },
                   child: Text(
                     translate('Privacy Statement'),
@@ -2456,7 +2456,7 @@ class _AboutState extends State<_About> {
                   ).marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString('https://estel.example.com'); // TODO Estel: 填真实官网 URL
+                    launchUrlString('https://lijue.net');
                   },
                   child: Text(
                     translate('Website'),
