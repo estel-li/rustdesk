@@ -1,21 +1,9 @@
 name: Full Flutter CI
 
 on:
+  # Manual only — go to the Actions tab and "Run workflow".
+  # Auto-build on push/PR is intentionally disabled.
   workflow_dispatch:
-  pull_request:
-    paths-ignore:
-    - "docs/**"
-    - "README.md"
-  push:
-    branches:
-      - master
-    paths-ignore:
-      - ".github/**"
-      - "docs/**"
-      - "README.md"
-      - "res/**"
-      - "appimage/**"
-      - "flatpak/**"
 
 jobs:
   run-ci:
